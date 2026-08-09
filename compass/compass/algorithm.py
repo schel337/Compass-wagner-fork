@@ -29,7 +29,7 @@ logger = logging.getLogger("compass")
 
 __all__ = ['singleSampleCompass']
 
-def singleSampleCompass(data, model, media, directory, sample_name, sample_index, args, metabolic_model_dir=MODEL_DIR, preprocess_cache_dir=PREPROCESS_CACHE_DIR):
+def singleSampleCompass(data, model, media, directory, sample_name, sample_index, args, metabolic_model_dir=MODEL_DIR, preprocess_cache_dir=PREPROCESS_CACHE_DIR, baseline_v_opt: dict | None = None):
     """
     Run Compass on a single column of data
 
@@ -54,6 +54,11 @@ def singleSampleCompass(data, model, media, directory, sample_name, sample_index
         More keyword arguments
             - lambda, num_neighbors, symmetric_kernel, species,
               and_function, test_mode, detailed_perf
+
+    baseline_v_opt : dict or None
+        When provided, reaction maximum fluxes (v_r^opt) are taken from this
+        dict instead of being recomputed.  This is used for KO comparisons so
+        that both baseline and KO scores share the same v_r^opt reference.
     """
     if not os.path.isdir(directory) and directory != '/dev/null':
         os.makedirs(directory)
@@ -102,7 +107,8 @@ def singleSampleCompass(data, model, media, directory, sample_name, sample_index
         logger.info("Evaluating Reaction Scores...")
         reaction_scores = compass_reactions(
             model, opt=opt, reaction_penalties=reaction_penalties_dict,
-            perf_log=perf_log, args=args, preprocess_cache_dir=preprocess_cache_dir)
+            perf_log=perf_log, args=args, preprocess_cache_dir=preprocess_cache_dir,
+            baseline_v_opt=baseline_v_opt)
     react_elapsed = time.process_time() - react_start
 
     #if user wants to calc reaction scores, but doesn't want to calc metabolite scores, calc only the exchange reactions
@@ -111,7 +117,8 @@ def singleSampleCompass(data, model, media, directory, sample_name, sample_index
     uptake_scores, secretion_scores, exchange_rxns = compass_exchange(
         model, opt=opt, reaction_penalties=reaction_penalties_dict,
         only_exchange=(not args['no_reactions']) and not args['calc_metabolites'],
-        perf_log=perf_log, args=args, preprocess_cache_dir=preprocess_cache_dir)
+        perf_log=perf_log, args=args, preprocess_cache_dir=preprocess_cache_dir,
+        baseline_v_opt=baseline_v_opt)
     exchange_elapsed = time.process_time() - exchange_start
 
     # Copy valid uptake/secretion reaction fluxes from uptake/secretion
@@ -183,13 +190,14 @@ def read_selected_reactions(select_reactions, select_subsystems, model):
 
 
 def compass_exchange(
-        model: MetabolicModel, 
-        opt: Optimizer, 
-        reaction_penalties: dict[str, float], 
-        only_exchange=False, 
-        perf_log=None, 
-        args = None, 
-        preprocess_cache_dir=PREPROCESS_CACHE_DIR
+        model: MetabolicModel,
+        opt: Optimizer,
+        reaction_penalties: dict[str, float],
+        only_exchange=False,
+        perf_log=None,
+        args = None,
+        preprocess_cache_dir=PREPROCESS_CACHE_DIR,
+        baseline_v_opt: dict | None = None,
     ):
     """
     Iterates through metabolites, finding each's max
@@ -319,16 +327,19 @@ def compass_exchange(
         # Close all uptake and extra secretion
         blocked_reactions = all_uptake + extra_secretion_rxns
         # Get max of secretion reaction
-        secretion_max = maximize_reaction(
-            model, 
-            opt, 
-            secretion_rxn, 
-            perf_log=perf_log, 
-            preprocess_cache_dir=preprocess_cache_dir, 
-            blocked_reactions=blocked_reactions, 
-            added_secretion=added_secretion, 
-            added_uptake=added_uptake
-        )
+        if baseline_v_opt is not None:
+            secretion_max = baseline_v_opt.get(secretion_rxn, 0.0)
+        else:
+            secretion_max = maximize_reaction(
+                model,
+                opt,
+                secretion_rxn,
+                perf_log=perf_log,
+                preprocess_cache_dir=preprocess_cache_dir,
+                blocked_reactions=blocked_reactions,
+                added_secretion=added_secretion,
+                added_uptake=added_uptake
+            )
 
         # Constrain secretion to be at least BETA * v_r^opt
         high_flux = { secretion_rxn: BETA * secretion_max }
@@ -360,16 +371,19 @@ def compass_exchange(
         # Close extra uptake and all secretion
         blocked_reactions = extra_uptake_rxns + all_secretion
         # Get max of uptake reaction
-        uptake_max = maximize_reaction(
-            model, 
-            opt, 
-            uptake_rxn, 
-            perf_log=perf_log, 
-            preprocess_cache_dir=preprocess_cache_dir,
-            blocked_reactions=blocked_reactions, 
-            added_secretion=added_secretion, 
-            added_uptake=added_uptake
-        )
+        if baseline_v_opt is not None:
+            uptake_max = baseline_v_opt.get(uptake_rxn, 0.0)
+        else:
+            uptake_max = maximize_reaction(
+                model,
+                opt,
+                uptake_rxn,
+                perf_log=perf_log,
+                preprocess_cache_dir=preprocess_cache_dir,
+                blocked_reactions=blocked_reactions,
+                added_secretion=added_secretion,
+                added_uptake=added_uptake
+            )
 
         # Constrain uptake to be at least BETA * _r^opt
         high_flux = { uptake_rxn: BETA * uptake_max }
@@ -406,12 +420,13 @@ def compass_exchange(
     return uptake_scores, secretion_scores, exchange_rxns
 
 def compass_reactions(
-        model: MetabolicModel, 
-        opt: Optimizer, 
-        reaction_penalties: dict[str, float], 
-        perf_log=None, 
-        args = None, 
-        preprocess_cache_dir=PREPROCESS_CACHE_DIR
+        model: MetabolicModel,
+        opt: Optimizer,
+        reaction_penalties: dict[str, float],
+        perf_log=None,
+        args = None,
+        preprocess_cache_dir=PREPROCESS_CACHE_DIR,
+        baseline_v_opt: dict | None = None,
     ):
 
     """
@@ -445,9 +460,15 @@ def compass_reactions(
 
         if reaction.is_exchange:
             continue
-        
-        # Logic for blocking partner reaction now in maximize_reaction
-        r_max = maximize_reaction(model, opt, reaction.id, perf_log=perf_log, preprocess_cache_dir=preprocess_cache_dir)
+
+        # Use baseline v_opt if provided, otherwise compute from the current model
+        # For KO comparisons: if the reaction is blocked in the KO model (upper_bound = 0),
+        # fall back to computing v_r^opt from the KO model so the high-flux constraint
+        # doesn't become infeasible (baseline flux > 0 vs KO upper-bound = 0).
+        if baseline_v_opt is not None and reaction.upper_bound > 0:
+            r_max = baseline_v_opt.get(reaction.id, 0.0)
+        else:
+            r_max = maximize_reaction(model, opt, reaction.id, perf_log=perf_log, preprocess_cache_dir=preprocess_cache_dir)
 
         # If Reaction can't carry flux anyways (v_r^opt = 0), just continue
         if r_max == 0:

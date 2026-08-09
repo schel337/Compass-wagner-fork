@@ -50,7 +50,14 @@ class GurobiOptimizer(Optimizer):
         """
         # Gurobi WLS License
         if 'WLSACCESSID' in self.credentials and 'WLSSECRET' in self.credentials and 'LICENSEID' in self.credentials:
-            env = gp.Env(params=self.credentials)
+            try:
+                env = gp.Env(params=self.credentials)
+            except gp.GurobiError as e:
+                if 'expired' in str(e).lower():
+                    logger.warning("WLS license has expired, falling back to unrestricted license")
+                    env = gp.Env()
+                else:
+                    raise
         # Gurobi Named-User License
         else:
             env = gp.Env()

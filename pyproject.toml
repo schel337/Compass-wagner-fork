@@ -36,6 +36,7 @@ dependencies = [
 
 [project.scripts]
 compass = "compass.main:entry"
+compass-ko = "compass.ko_orchestrate:entry"
 
 [project.optional-dependencies]
 dev = [

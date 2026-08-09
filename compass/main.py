@@ -37,16 +37,15 @@ from .turbo_compass import turbo_compass_entry
 
 
 
-def parseArgs():
-    """Defines the command-line arguments and parses the Compass call
+def build_parser(prog="Compass"):
+    """Build the shared argument parser used by ``compass`` and ``compass-ko``.
 
-    Returns
-    -------
-    argparse.Namespace
-
+    Returns a fully configured ``argparse.ArgumentParser`` with all standard
+    COMPASS arguments registered.  Callers (e.g. ``ko_orchestrate``) can add
+    additional arguments before parsing.
     """
     parser = argparse.ArgumentParser(
-                        prog="Compass",
+                        prog=prog,
                         description="Compass version "+str(__version__)+
                         ". Metabolic Modeling for Single Cells. "
                         "For more details on usage refer to the documentation: https://github.com/wagnerlab-berkeley/Compass",
@@ -254,6 +253,18 @@ def parseArgs():
     parser.add_argument("--close-oxygen", action="store_true",
                         help="Set lower bound of oxygen exchange reaction to 0")
 
+    # Hidden arguments for in silico KO orchestration.
+    # When set, the run uses the KO model's v_opt cache for the high-flux definition,
+    # so that baseline and KO scores share the same v_r^opt reference.
+    parser.add_argument("--ko-baseline-cache-media",
+                        help=argparse.SUPPRESS,
+                        required=False,
+                        metavar="MEDIA")
+    parser.add_argument("--ko-baseline-cache-dir",
+                        help=argparse.SUPPRESS,
+                        required=False,
+                        metavar="DIR")
+
     # Hidden argument.  Used for batch jobs
     parser.add_argument("--collect", action="store_true",
                         help=argparse.SUPPRESS)
@@ -393,7 +404,18 @@ def parseArgs():
                         choices=["gurobi", "cuopt"],
                         default="gurobi")
 
-    # Parse known args first to check for optimizer setting
+    return parser
+
+
+def parseArgs():
+    """Defines the command-line arguments and parses the Compass call
+
+    Returns
+    -------
+    argparse.Namespace
+
+    """
+    parser = build_parser()
     args, _ = parser.parse_known_args()
 
     if args.optimizer == "cuopt":
@@ -622,6 +644,55 @@ def compass_work(args, logger, start_time):
     Main work of the algorithm, including deciding what steps to take based on arguments is here
     This is split from entry() to enable using a try block around it (useful in followup PR)
     """
+
+    # ── KO v_opt injection ──
+    # When --ko-baseline-cache-media is set, load the KO v_opt cache so that
+    # this run uses the KO's v_r^opt for the high-flux definition.
+    # This ensures baseline and KO scores are comparable (same normalization).
+    baseline_v_opt = None
+    if args['ko_baseline_cache_media'] is not None:
+        baseline_cache_dir = args.get('ko_baseline_cache_dir')
+        if baseline_cache_dir is None:
+            baseline_cache_dir = PREPROCESS_CACHE_DIR
+
+        # For Module-Compass, load cache from each meta-subsystem model
+        if args['select_meta_subsystems']:
+            # Parse meta-subsystem names from the file
+            with open(args['select_meta_subsystems']) as f:
+                text = [line.strip() for line in f.readlines()]
+            meta_model_names = []
+            for line in text:
+                if line:
+                    meta_model_names.append(line.split(':')[0].strip())
+
+            # Load cache for all meta-subsystem models
+            baseline_cache = {}
+            for meta_model_name in meta_model_names:
+                baseline_cache.update(cache.load(
+                    meta_model_name,
+                    media=args['ko_baseline_cache_media'],
+                    preprocess_cache_dir=baseline_cache_dir,
+                ))
+        else:
+            baseline_cache = cache.load(
+                args['model'],
+                media=args['ko_baseline_cache_media'],
+                preprocess_cache_dir=baseline_cache_dir,
+            )
+
+        if len(baseline_cache) == 0:
+            logger.error(
+                "KO cache is empty for model '%s', media '%s'. "
+                "Run the KO COMPASS phase with --precache first.",
+                args['model'], args['ko_baseline_cache_media']
+            )
+            return
+        baseline_v_opt = dict(baseline_cache)
+        logger.info(
+            "Loaded KO v_opt cache with %d entries (model=%s, media=%s)",
+            len(baseline_v_opt), args['model'], args['ko_baseline_cache_media']
+        )
+        args['baseline_v_opt'] = baseline_v_opt
 
     if args['turbo'] < 1.0:
 
@@ -937,7 +1008,8 @@ def compass_work(args, logger, start_time):
                                     sample_name=sample_name,
                                     sample_index=args['single_sample'], args=args,
                                     metabolic_model_dir=meta_subsystem_models_dir,
-                                    preprocess_cache_dir=meta_subsystem_preprocess_cache_dir)
+                                    preprocess_cache_dir=meta_subsystem_preprocess_cache_dir,
+                                    baseline_v_opt=args.get('baseline_v_opt'))
                 end_time = datetime.datetime.now()
                 logger.debug("\nElapsed Time: {}\n".format(end_time-start_time))
 
@@ -1025,7 +1097,8 @@ def compass_work(args, logger, start_time):
                                         sample_name=sample_name, 
                                         sample_index=args['single_sample'], args=args,
                                         metabolic_model_dir=meta_subsystem_models_dir,
-                                        preprocess_cache_dir=meta_subsystem_preprocess_cache_dir)
+                                        preprocess_cache_dir=meta_subsystem_preprocess_cache_dir,
+                                        baseline_v_opt=args.get('baseline_v_opt'))
                     end_time = datetime.datetime.now()
                     logger.debug("\nElapsed Time: {}\n".format(end_time-start_time))
 
@@ -1070,7 +1143,8 @@ def compass_work(args, logger, start_time):
                 singleSampleCompass(data=args['data'], model=args['model'],
                                     media=args['media'], directory=args['temp_dir'],
                                     sample_name=sample_name,
-                                    sample_index=args['single_sample'], args=args)
+                                    sample_index=args['single_sample'], args=args,
+                                    baseline_v_opt=args.get('baseline_v_opt'))
                 end_time = datetime.datetime.now()
                 logger.debug("\nElapsed Time: {}\n".format(end_time-start_time))
                 return
@@ -1137,7 +1211,8 @@ def compass_work(args, logger, start_time):
                 singleSampleCompass(data=args['data'], model=args['model'],
                                     media=args['media'], directory=args['temp_dir'],
                                     sample_name=sample_name,
-                                    sample_index=args['single_sample'], args=args)
+                                    sample_index=args['single_sample'], args=args,
+                                    baseline_v_opt=args.get('baseline_v_opt'))
                 end_time = datetime.datetime.now()
                 logger.debug("\nElapsed Time: {}\n".format(end_time-start_time))
                 return
@@ -1601,10 +1676,11 @@ def _parallel_map_fun(sample_name, i, args, model_name=None, temp_dir=None, meta
                 singleSampleCompass(
                     data=data, model=model,
                     media=media, directory=sample_dir,
-                    sample_name=sample_name, 
+                    sample_name=sample_name,
                     sample_index=i, args=args,
                     metabolic_model_dir=metabolic_model_dir,
-                    preprocess_cache_dir=preprocess_cache_dir
+                    preprocess_cache_dir=preprocess_cache_dir,
+                    baseline_v_opt=args.get('baseline_v_opt'),
                 )
             except Exception as e:
                 traceback.print_exc(file=ferr)
