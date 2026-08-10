@@ -82,7 +82,13 @@ def _parse_full_args():
 
 
 def load_scores(output_dir, filename="reactions.tsv"):
-    """Load reaction scores from a COMPASS output directory."""
+    """Load reaction scores from a COMPASS output directory.
+
+    Handles both plain output directories and meta-subsystem layouts
+    where scores live under <output_dir>/<meta_subsystem>/reactions.tsv.
+    If multiple meta-subsystem subdirectories are found the scores are
+    concatenated (reactions from different subsystems are non-overlapping).
+    """
     path = os.path.join(output_dir, filename)
     if os.path.exists(path):
         return pd.read_csv(path, sep="\t", index_col=0)
@@ -90,6 +96,22 @@ def load_scores(output_dir, filename="reactions.tsv"):
     path = os.path.join(output_dir, "reactions.txt")
     if os.path.exists(path):
         return pd.read_csv(path, sep="\t", index_col=0)
+
+    # Meta-subsystem layout: look for subdirectories containing the file
+    scores = []
+    for entry in sorted(os.listdir(output_dir)):
+        sub_dir = os.path.join(output_dir, entry)
+        if os.path.isdir(sub_dir):
+            sub_path = os.path.join(sub_dir, filename)
+            if os.path.exists(sub_path):
+                scores.append(pd.read_csv(sub_path, sep="\t", index_col=0))
+            else:
+                sub_path_txt = os.path.join(sub_dir, "reactions.txt")
+                if os.path.exists(sub_path_txt):
+                    scores.append(pd.read_csv(sub_path_txt, sep="\t", index_col=0))
+
+    if scores:
+        return pd.concat(scores)
     return pd.DataFrame()
 
 
