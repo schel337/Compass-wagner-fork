@@ -21,10 +21,18 @@ def create_process_pool(args):
     """
     Creates multiprocessing pool for compass
     Configures multiprocessing to avoid issues if CUDA is being used.
+    Uses 'forkserver' start method to avoid deadlocks with threaded BLAS/LAPACK
+    libraries (e.g. after Gurobi child processes return).
     """
     if args["optimizer"] == "cuopt":
         from .opt.cuopt import configure_multiprocessing
         configure_multiprocessing()
+
+    if not MULTIPROCESSING_CONFIGURED:
+        try:
+            multiprocessing.set_start_method('forkserver', force=True)
+        except RuntimeError:
+            pass  # Start method already set
     return multiprocessing.Pool(args['num_processes'])
 
 def get_steadystate_constraints(model, gp_model):
