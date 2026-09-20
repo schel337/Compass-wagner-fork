@@ -60,6 +60,9 @@ doc = [
 test = [
     "pytest",
     "coverage",
+    "pytest-timeout",
+    "pytest-mock",
+    "highspy",
 ]
 
 [tool.hatch.build.targets.wheel]
@@ -76,6 +79,11 @@ testpaths = ["tests"]
 xfail_strict = true
 addopts = [
     "--import-mode=importlib",  # allow using test files with same name
+    "-m",
+    "not slow",  # run slow (large-model / long-run) tests with `pytest -m slow` or `pytest -m "not slow or slow"`
+]
+markers = [
+    "slow: tests that require large metabolic models or long solver runs (deselect with '-m \"not slow\"')",
 ]
 
 [tool.ruff]

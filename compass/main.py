@@ -64,9 +64,10 @@ def parseArgs():
                         metavar="FILE")
 
     parser.add_argument("--model", help="Metabolic Model to Use."
-                        " Currently supporting: RECON1_mat, RECON2_mat, RECON2.2, Human1, or Mouse1",
+                        " Currently supporting: RECON1_mat, RECON2_mat, RECON2.2, Human1, Mouse1,"
+                        " plus any model directory under Resources/Metabolic Models (e.g. SubModel_cc)",
                         default="RECON2_mat",
-                        choices=["RECON1_mat", "RECON2_mat", "RECON2.2", "Human1", "Mouse1"],
+                        choices=sorted(os.listdir(MODEL_DIR)),
                         metavar="MODEL")
 
     parser.add_argument("--species",
@@ -390,7 +391,7 @@ def parseArgs():
 
     parser.add_argument("--optimizer",
                         help = "Select an optimization software to solve flux balance analysis problems with. Select an optimizer with --help to see options specific to the optimizer",
-                        choices=["gurobi", "cuopt"],
+                        choices=["gurobi", "cuopt", "highs"],
                         default="gurobi")
 
     # Parse known args first to check for optimizer setting
@@ -400,6 +401,8 @@ def parseArgs():
         default_method = 1 #pdlp 
     elif args.optimizer == "gurobi":
         default_method = 4
+    elif args.optimizer == "highs":
+        default_method = None # HiGHS does not expose an algorithm choice for LPs
     
     if args.lpmethod is None:
         args.lpmethod = default_method
@@ -503,18 +506,22 @@ def entry():
 
     args = parseArgs()
 
-    if (not args['set_license']) and (not os.path.exists(os.path.join(globals.LICENSE_DIR, 'gurobi.lic'))):
-        print('A Gurobi license is required to run Compass. Run Compass again with \'--set-license <PATH_TO_LICENSE>\' to save license.')
-        return
-    elif args['set_license']:
+    if args['set_license']:
 
         src_license_path = args['set_license']
         dest_license_path = os.path.join(globals.LICENSE_DIR, 'gurobi.lic')
-    
+
         shutil.copy(src_license_path, dest_license_path)
 
         if os.path.exists(os.path.join(globals.LICENSE_DIR, 'gurobi.lic')):
             print('Successfully saved Gurobi license')
+        return
+
+    if (args['optimizer'] == 'gurobi'
+            and not os.path.exists(os.path.join(globals.LICENSE_DIR, 'gurobi.lic'))):
+        print('A Gurobi license is required to run Compass with the Gurobi optimizer. '
+              "Run Compass again with '--set-license <PATH_TO_LICENSE>' to save license, "
+              "or use a different optimizer via '--optimizer' (e.g. 'highs').")
         return
 
     if args['example_inputs']:

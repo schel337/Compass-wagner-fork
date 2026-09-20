@@ -91,6 +91,13 @@ ENV/
 # Visual Studio Code configuration
 .vscode
 
-tests/test*
 docs/notebooks/compass_results*
 *.ipynb
+
+# Virtual environments
+.venv/
+
+# Gurobi credentials and installers must never be committed
+gurobi.lic
+gurobi*.tar.gz
+gurobi*.tar.gz:*

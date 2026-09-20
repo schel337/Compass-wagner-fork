@@ -14,7 +14,8 @@ import numpy as np
 
 from compass.models.MetabolicModel import MetabolicModel, Reaction
 from compass.opt.base import LinearProgramDelta, Optimizer, Solution
-from compass.opt.gurobi import GurobiOptimizer, get_gurobi_config
+# NOTE: gurobi/cuopt are imported lazily in initialize_optimization so that
+# using one optimizer does not require the others to be installed.
 from .. import utils
 from .. import models
 from . import cache
@@ -503,6 +504,7 @@ def initialize_optimization(model: MetabolicModel, args) -> Optimizer:
     num_threads = args.get('num_threads')
     lpmethod = args.get('lpmethod')
     if args['optimizer'] == "gurobi":
+        from compass.opt.gurobi import GurobiOptimizer, get_gurobi_config
         credentials = utils.get_gurobi_credentials()
         config = get_gurobi_config(num_threads, lpmethod)
         return GurobiOptimizer(model, config, credentials=credentials)
@@ -510,6 +512,10 @@ def initialize_optimization(model: MetabolicModel, args) -> Optimizer:
         from compass.opt.cuopt import CuoptOptimizer, get_cuopt_config
         config = get_cuopt_config(num_threads, method=lpmethod)
         return CuoptOptimizer(model, config)
+    elif args['optimizer'] == "highs":
+        from compass.opt.highs import HighsOptimizer, get_highs_config
+        config = get_highs_config(num_threads, lpmethod)
+        return HighsOptimizer(model, config)
 
 def maximize_reaction(
         model: MetabolicModel, 
@@ -549,8 +555,8 @@ def maximize_reaction(
 
     # Set partner reaction upper-limit to 0 in problem, if it exists
     rxn = model.reactions.get(rxn_id)
-    if rxn.reverse_reaction:
-        blocked_reactions.append(rxn_id.reverse_reaction.id)
+    if rxn is not None and rxn.reverse_reaction:
+        blocked_reactions.append(rxn.reverse_reaction.id)
 
     # Maximize the reaction
     objective = { rxn_id : 1.0 }

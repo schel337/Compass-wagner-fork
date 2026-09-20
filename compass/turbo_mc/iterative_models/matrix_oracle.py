@@ -85,7 +85,8 @@ class OracleWithAPrescribedMatrix(MatrixOracle):
     def _observe_entries(
         self,
         rows: List[int],
-        cols: List[int]
+        cols: List[int],
+        iter: int = 0
     ) -> np.array:
         return self.X[(rows, cols)]
 
@@ -107,6 +108,7 @@ class WarmstartedOracleWithAPrescribedMatrix(MatrixOracle):
     def _observe_entries(
         self,
         rows: List[int],
-        cols: List[int]
+        cols: List[int],
+        iter: int = 0
     ) -> np.array:
         return self.X[(rows, cols)]
