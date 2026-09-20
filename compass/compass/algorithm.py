@@ -19,6 +19,7 @@ from compass.opt.base import LinearProgramDelta, Optimizer, Solution
 from .. import utils
 from .. import models
 from . import cache
+from .activity import read_block_reactions_file
 from ..globals import BETA, EXCHANGE_LIMIT, LICENSE_DIR, MODEL_DIR
 from .cache import PREPROCESS_CACHE_DIR
 import compass.global_state as global_state
@@ -325,7 +326,8 @@ def compass_exchange(
             preprocess_cache_dir=preprocess_cache_dir, 
             blocked_reactions=blocked_reactions, 
             added_secretion=added_secretion, 
-            added_uptake=added_uptake
+            added_uptake=added_uptake,
+            activity_override=args.get('activity_override')
         )
 
         # Constrain secretion to be at least BETA * v_r^opt
@@ -366,7 +368,8 @@ def compass_exchange(
             preprocess_cache_dir=preprocess_cache_dir,
             blocked_reactions=blocked_reactions, 
             added_secretion=added_secretion, 
-            added_uptake=added_uptake
+            added_uptake=added_uptake,
+            activity_override=args.get('activity_override')
         )
 
         # Constrain uptake to be at least BETA * _r^opt
@@ -445,7 +448,8 @@ def compass_reactions(
             continue
         
         # Logic for blocking partner reaction now in maximize_reaction
-        r_max = maximize_reaction(model, opt, reaction.id, perf_log=perf_log, preprocess_cache_dir=preprocess_cache_dir)
+        r_max = maximize_reaction(model, opt, reaction.id, perf_log=perf_log, preprocess_cache_dir=preprocess_cache_dir,
+                                  activity_override=args.get('activity_override'))
 
         # If Reaction can't carry flux anyways (v_r^opt = 0), just continue
         if r_max == 0:
@@ -497,22 +501,57 @@ def initialize_optimization(model: MetabolicModel, args) -> Optimizer:
     """
     Builds a flux balance analysis model from the specified metabolic model.
     Uses args to determine which optimizer will be used and how to configure it.
+
+    If args contains 'block_reactions' (a set of directed reaction IDs from
+    a --block-reactions file), those reactions are blocked in every problem
+    solved by the returned optimizer, implementing an in-silico metabolic
+    knockout. Unrecognized IDs are dropped (with a log message), matching
+    the convention of --select-reactions.
     """
     num_threads = args.get('num_threads')
     lpmethod = args.get('lpmethod')
+    blocked_reactions = resolve_blocked_reactions(args, model)
     if args['optimizer'] == "gurobi":
         from compass.opt.gurobi import GurobiOptimizer, get_gurobi_config
         credentials = utils.get_gurobi_credentials()
         config = get_gurobi_config(num_threads, lpmethod)
-        return GurobiOptimizer(model, config, credentials=credentials)
+        return GurobiOptimizer(model, config, credentials=credentials,
+                               blocked_reactions=blocked_reactions)
     elif args['optimizer'] == "cuopt":
         from compass.opt.cuopt import CuoptOptimizer, get_cuopt_config
         config = get_cuopt_config(num_threads, method=lpmethod)
-        return CuoptOptimizer(model, config)
+        return CuoptOptimizer(model, config, blocked_reactions=blocked_reactions)
     elif args['optimizer'] == "highs":
         from compass.opt.highs import HighsOptimizer, get_highs_config
         config = get_highs_config(num_threads, lpmethod)
-        return HighsOptimizer(model, config)
+        return HighsOptimizer(model, config, blocked_reactions=blocked_reactions)
+
+
+def resolve_blocked_reactions(args, model: MetabolicModel) -> set[str]:
+    """
+    Resolves the run-level (in-silico KO) block list from args to the set of
+    directed reaction IDs actually present in the model.
+
+    args['block_reactions'] may be a list/set of directed IDs already parsed
+    from a --block-reactions file, or the file path itself (e.g. when the
+    API is used directly without going through main.entry()).
+    """
+    raw = args.get('block_reactions')
+    if not raw:
+        return set()
+    if isinstance(raw, str):
+        raw = read_block_reactions_file(raw)
+    blocked = set(raw)
+    valid = blocked & set(model.reactions.keys())
+    ignored = blocked - valid
+    if ignored:
+        logger.info("Ignoring %d unrecognized reaction IDs in the block reactions list: %s",
+                    len(ignored), sorted(ignored))
+    if valid:
+        logger.info("Blocking %d reactions in every LP (in-silico KO): %s",
+                    len(valid), sorted(valid))
+    return valid
+
 
 def maximize_reaction(
         model: MetabolicModel, 
@@ -524,11 +563,19 @@ def maximize_reaction(
         blocked_reactions: list[str] | None = None,
         added_secretion: dict | None = None,
         added_uptake: dict | None = None,
+        activity_override: dict[str, float] | None = None,
     ):
     """
     Maximizes the current reaction in the problem
     Attempts to retrieve the value from cache, and populates the cache on a cache miss
     The blocked_reactions, added_secretion, and added_uptake parameters are used for compass_exchange
+
+    If activity_override is not None, the maximization is NOT solved: the
+    v_r^opt value is looked up from activity_override instead, and a
+    missing reaction is an error (a silent re-solve would break the
+    paired-run comparison that the override exists to guarantee). This is
+    how the no-KO leg (run B) of a paired in-silico KO experiment reuses
+    the activity values computed by the KO leg (run A).
     """
     if blocked_reactions is None:
         blocked_reactions = []
@@ -540,6 +587,19 @@ def maximize_reaction(
     if perf_log is not None:
         start_time = time.process_time()
         perf_log['order'][rxn_id] = len(perf_log['order'])
+
+    # Fixed activity values from a paired KO run: no solving, no cache
+    if activity_override is not None:
+        if rxn_id not in activity_override:
+            raise ValueError(
+                f"Reaction '{rxn_id}' has no entry in the supplied activity override "
+                f"({len(activity_override)} reactions). v_r^opt cannot be solved for "
+                f"this run (it would use different, unpaired activity values), so the "
+                f"activity file must be regenerated from the paired KO run.")
+        if perf_log is not None:
+            perf_log['cached'][rxn_id] = True
+            perf_log['max rxn time'][rxn_id] = 0.0
+        return float(activity_override[rxn_id])
 
     # Load from cache if it exists and return
     if use_cache:

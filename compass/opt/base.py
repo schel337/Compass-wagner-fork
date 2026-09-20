@@ -29,8 +29,8 @@ class LinearProgramDelta:
     added_secretion: dict[str, str] = field(default_factory=dict)
     # Metabolite ID -> reaction ID for new uptake reaction
     added_uptake: dict[str, str] = field(default_factory=dict)
-    # Reaction IDs
-    blocked_reactions: set[str] = field(default_factory=set)
+    # Reaction IDs (list or set)
+    blocked_reactions: set[str] | list[str] = field(default_factory=set)
     # Reaction ID -> new minimum flux
     # Used to add the constraints for the maximum flux to be near v_r^opt
     high_flux: dict[str, np.float64] = field(default_factory=dict)
@@ -55,13 +55,21 @@ class Optimizer(abc.ABC):
     Abstract base class for an optimization solver.
     """
 
-    def __init__(self, model: MetabolicModel):
+    def __init__(self, model: MetabolicModel, blocked_reactions: set[str] | None = None):
         self.model = model
+        # Reactions that are blocked for the lifetime of this optimizer,
+        # in addition to any per-problem delta.blocked_reactions. Used for
+        # simulating in-silico metabolic knockouts: the KO reactions must
+        # carry no flux in *any* problem (maximization or penalty
+        # minimization), including the per-reaction v_r^opt maximizations.
+        self.blocked_reactions = set(blocked_reactions) if blocked_reactions else set()
 
     @abc.abstractmethod
     def solve(self, delta: LinearProgramDelta) -> Solution:
         """
         Solve the linear program with the delta applied.
+        Implementations must block the union of delta.blocked_reactions
+        and self.blocked_reactions.
         If possible, the problem should be restored to the base state after.
         """
         pass

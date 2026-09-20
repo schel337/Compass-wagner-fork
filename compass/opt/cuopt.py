@@ -115,11 +115,12 @@ class CuoptOptimizer(Optimizer):
     variables: dict[str, Variable]
     constraints: dict[str, Constraint]
 
-    def __init__(self, model: MetabolicModel, config: dict[str, Any]):
+    def __init__(self, model: MetabolicModel, config: dict[str, Any],
+                 blocked_reactions: set[str] | None = None):
         """
         Note that there is a default config, any values in the passed config will overwrite the default
         """
-        super().__init__(model)
+        super().__init__(model, blocked_reactions=blocked_reactions)
         self.solver_settings = SolverSettings()
         for name, value in config.items():
             self.solver_settings.set_parameter(name, value)
@@ -191,7 +192,7 @@ class CuoptOptimizer(Optimizer):
             met_constr = self.constraints[met_id]
             self.problem.updateConstraint(met_constr, coeffs=[(rxn_var, 1.0)])
 
-        for rxn_id in delta.blocked_reactions:
+        for rxn_id in set(delta.blocked_reactions) | self.blocked_reactions:
             var = self.variables[rxn_id]
             old_ub = var.getUpperBound()
             old_lb = var.getLowerBound()

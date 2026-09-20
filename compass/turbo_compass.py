@@ -139,6 +139,14 @@ class CompassResourceManager():
         Recall that this data contains the reaction maximums, that are used many
         times, which is why it is good to cache them first.
         """
+        # Fixed v_r^opt activity values (--activity-file) replace the
+        # per-reaction maximizations entirely, so no cache is required.
+        if self.compass_parsed_args.get('activity_file'):
+            logger.info("Turbo-Compass: fixed v_r^opt activity values supplied via "
+                        f"--activity-file ({self.compass_parsed_args['activity_file']}); "
+                        "skipping cache check")
+            return
+
         compass_args = deepcopy(self.compass_args)
         media = self.compass_parsed_args["media"]
         if media is None:
@@ -154,7 +162,8 @@ class CompassResourceManager():
                 )
         else:
             model = self.compass_parsed_args["model"]
-            cache.load(model, media)
+            preprocess_cache_dir = self.compass_parsed_args.get('preprocess_cache_dir') or cache.PREPROCESS_CACHE_DIR
+            cache.load(model, media, preprocess_cache_dir=preprocess_cache_dir)
             if len(cache._cache[(model, media)]) == 0:
                 raise ValueError(
                     f"Cache not present for model '{model}' and media '{media}'."

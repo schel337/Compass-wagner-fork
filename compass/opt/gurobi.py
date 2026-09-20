@@ -36,8 +36,9 @@ class GurobiOptimizer(Optimizer):
     Gurobi-based implementation of the Optimizer.
     """
 
-    def __init__(self, model: MetabolicModel, config: dict[str, Any], credentials: dict[str, str] = None):
-        super().__init__(model)
+    def __init__(self, model: MetabolicModel, config: dict[str, Any], credentials: dict[str, str] = None,
+                 blocked_reactions: set[str] | None = None):
+        super().__init__(model, blocked_reactions=blocked_reactions)
         self.credentials = credentials
 
         self.config = config
@@ -121,9 +122,10 @@ class GurobiOptimizer(Optimizer):
             # Find way to remove gp_model.update() in added_secretion
             self.gp_model.update()
 
-        # Close all blocked reactions by setting upper bound to lower bound
+        # Close all blocked reactions (per-problem deltas plus run-level,
+        # e.g. metabolic knockouts) by setting upper bound to lower bound
         # and store previous bounds so they can be restored later
-        for rxn_id in delta.blocked_reactions:
+        for rxn_id in set(delta.blocked_reactions) | self.blocked_reactions:
             # TODO: Note that getVarByName is inefficient.
             var = self.gp_model.getVarByName(rxn_id)
             old_ub = var.getAttr(GRB.Attr.UB)

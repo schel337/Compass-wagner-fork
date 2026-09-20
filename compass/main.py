@@ -21,6 +21,7 @@ from six import string_types
 from math import ceil
 
 from .compass import cache
+from .compass.activity import read_block_reactions_file, read_activity_file
 from ._version import __version__
 from .compass.torque import submitCompassTorque
 from .compass.algorithm import singleSampleCompass, maximize_reaction_range, maximize_metab_range
@@ -245,6 +246,21 @@ def parseArgs():
         required=False,
         metavar="FILE"
     )
+
+    parser.add_argument("--block-reactions",
+                        help="In-silico metabolic knockout: file with the reactions to block (zero flux in every linear program of this run, including the per-reaction v_r^opt maximizations). One reaction ID per line; a directed ID (e.g. 'R123_pos') blocks that direction only, while an undirected ID (e.g. 'R123') blocks both 'R123_pos' and 'R123_neg'. Unrecognized reactions in FILE are ignored.",
+                        required=False,
+                        metavar="FILE")
+
+    parser.add_argument("--activity-file",
+                        help="Use fixed v_r^opt ('high metabolic activity') values instead of solving the per-reaction maximization problems. FILE is a TSV with one 'reaction_id<TAB>v_r_opt' line per reaction. This makes a run a paired comparison leg of an in-silico KO experiment: pass the activity file exported from the KO run (see scripts/ko_paired_run.py). Reactions missing from FILE are an error. Cannot be combined with --precache or --generate-cache.",
+                        required=False,
+                        metavar="FILE")
+
+    parser.add_argument("--preprocess-cache-dir",
+                        help=argparse.SUPPRESS,
+                        required=False,
+                        metavar="DIR")
 
     parser.add_argument("--glucose", type=float,
                         required=False, help=argparse.SUPPRESS)
@@ -487,6 +503,14 @@ def parseArgs():
             "without --calc-metabolites" #Not sure about why this needs metabolites to calculated
         )
 
+    if args['activity_file'] and (args['precache'] or args['generate_cache']):
+
+        parser.error(
+            "--activity-file cannot be combined with --precache or "
+            "--generate-cache: the v_r^opt values are read from the "
+            "activity file, so no cache is built or regenerated"
+        )
+
     if args['reaction_range']:
         args['reaction_range'] = [int(x) for x in args['reaction_range']]
     if args['metabolite_range']:
@@ -619,6 +643,34 @@ def entry():
         logger.debug("   {}: {}".format(key, val))
 
     logger.debug("\nCOMPASS Started: {}".format(start_time))
+
+    # In-silico KO simulation: turn the --block-reactions / --activity-file
+    # file paths into ready-to-use values (a set of directed reaction IDs
+    # and a dict of v_r^opt values) for the scoring stage. Logging the
+    # sources here keeps the pairing of a KO run and its comparison run
+    # auditable.
+    if args['block_reactions']:
+        args['block_reactions'] = os.path.abspath(args['block_reactions'])
+        if not os.path.exists(args['block_reactions']):
+            print("Error: cannot find block reactions file " + args['block_reactions'])
+            return
+        args['block_reactions'] = read_block_reactions_file(args['block_reactions'])
+        args['block_reactions'] = sorted(args['block_reactions'])  # list: JSON-serializable for batch jobs
+        logger.info("Metabolic KO: %d directed reaction(s) will be blocked in every linear program: %s",
+                    len(args['block_reactions']), args['block_reactions'])
+
+    if args['activity_file']:
+        args['activity_file'] = os.path.abspath(args['activity_file'])
+        if not os.path.exists(args['activity_file']):
+            print("Error: cannot find activity file " + args['activity_file'])
+            return
+        args['activity_override'] = read_activity_file(args['activity_file'])
+        logger.info("Using fixed v_r^opt activity values from %s (%d reactions); "
+                    "per-reaction maximization problems will not be solved",
+                    args['activity_file'], len(args['activity_override']))
+    else:
+        args['activity_override'] = None
+
     # Parse arguments and decide what course of action to take
 
     compass_work(args, logger, start_time)
@@ -660,7 +712,10 @@ def compass_work(args, logger, start_time):
                                 isoform_summing=args['isoform_summing'],
                                 metabolic_model_dir=meta_subsystem_models_dir), 
                                 args['media'], preprocess_cache_dir=meta_subsystem_preprocess_cache_dir))
-                if size_of_cache == 0 or args['precache']:
+                if args.get('activity_override') is not None:
+                    logger.info("Fixed v_r^opt activity values supplied via --activity-file; "
+                                "skipping model cache build")
+                elif size_of_cache == 0 or args['precache']:
                     logger.info("Building up model cache")
                     # Compute v_r^opt for each reaction beforehand
                     precacheCompass(args=args, model_name=meta_subsystem_model, 
@@ -1077,7 +1132,8 @@ def compass_work(args, logger, start_time):
                 singleSampleCompass(data=args['data'], model=args['model'],
                                     media=args['media'], directory=args['temp_dir'],
                                     sample_name=sample_name,
-                                    sample_index=args['single_sample'], args=args)
+                                    sample_index=args['single_sample'], args=args,
+                                    preprocess_cache_dir=args.get('preprocess_cache_dir') or PREPROCESS_CACHE_DIR)
                 end_time = datetime.datetime.now()
                 logger.debug("\nElapsed Time: {}\n".format(end_time-start_time))
                 return
@@ -1144,7 +1200,8 @@ def compass_work(args, logger, start_time):
                 singleSampleCompass(data=args['data'], model=args['model'],
                                     media=args['media'], directory=args['temp_dir'],
                                     sample_name=sample_name,
-                                    sample_index=args['single_sample'], args=args)
+                                    sample_index=args['single_sample'], args=args,
+                                    preprocess_cache_dir=args.get('preprocess_cache_dir') or PREPROCESS_CACHE_DIR)
                 end_time = datetime.datetime.now()
                 logger.debug("\nElapsed Time: {}\n".format(end_time-start_time))
                 return
@@ -1251,7 +1308,10 @@ def compass_work(args, logger, start_time):
                                 isoform_summing=args['isoform_summing'],
                                 metabolic_model_dir=meta_subsystem_models_dir), 
                                 args['media'], preprocess_cache_dir=meta_subsystem_preprocess_cache_dir))
-                if size_of_cache == 0 or args['precache']:
+                if args.get('activity_override') is not None:
+                    logger.info("Fixed v_r^opt activity values supplied via --activity-file; "
+                                "skipping model cache build")
+                elif size_of_cache == 0 or args['precache']:
                     logger.info("Building up model cache")
                     # Compute v_r^opt for each reaction beforehand
                     precacheCompass(args=args, model_name=meta_subsystem_model, 
@@ -1392,14 +1452,20 @@ def compass_work(args, logger, start_time):
         # Normal Compass
         else:
 
+            preprocess_cache_dir = args.get('preprocess_cache_dir') or PREPROCESS_CACHE_DIR
+
             #Check if the cache for (model, media) exists already:
             size_of_cache = len(cache.load(init_model(model=args['model'], species=args['species'],
                             exchange_limit=globals.EXCHANGE_LIMIT, media=args['media'], 
-                            isoform_summing=args['isoform_summing']), args['media']))
-            if size_of_cache == 0 or args['precache']:
+                            isoform_summing=args['isoform_summing']), args['media'],
+                            preprocess_cache_dir=preprocess_cache_dir))
+            if args.get('activity_override') is not None:
+                logger.info("Fixed v_r^opt activity values supplied via --activity-file; "
+                            "skipping model cache build")
+            elif size_of_cache == 0 or args['precache']:
                 logger.info("Building up model cache")
                 # Compute v_r^opt for each reaction beforehand
-                precacheCompass(args=args)
+                precacheCompass(args=args, preprocess_cache_dir=preprocess_cache_dir)
                 end_time = datetime.datetime.now()
                 logger.debug("\nElapsed Time: {}\n".format(end_time-start_time))
                 if not args['data']:
@@ -1472,7 +1538,7 @@ def compass_work(args, logger, start_time):
                                     queue=args['torque_queue'])
                 return
             else:
-                runCompassParallel(args)
+                runCompassParallel(args, preprocess_cache_dir=preprocess_cache_dir)
                 end_time = datetime.datetime.now()
                 logger.debug("\nElapsed Time: {}\n".format(end_time-start_time))
                 return
@@ -1488,9 +1554,13 @@ def save_single_sample_penalties(i, temp_dir, sample_penalties):
     sample_penalties.to_csv(os.path.join(single_sample_dir, 'penalties.txt.gz'), sep='\t', compression='gzip')
 
 
-def runCompassParallel(args, model_name=None, temp_dir=None, output_dir=None, metabolic_model_dir=MODEL_DIR, preprocess_cache_dir=PREPROCESS_CACHE_DIR):
+def runCompassParallel(args, model_name=None, temp_dir=None, output_dir=None, metabolic_model_dir=MODEL_DIR, preprocess_cache_dir=None):
 
     logger = logging.getLogger('compass')
+
+    # If preprocess_cache_dir is not specified, use the default
+    if preprocess_cache_dir is None:
+        preprocess_cache_dir = PREPROCESS_CACHE_DIR
 
     # If we're here, then run compass on this machine with N processes
     if args['num_processes'] is None:
