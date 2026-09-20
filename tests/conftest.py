@@ -132,14 +132,23 @@ def solver_available(name: str) -> bool:
             env = gp.Env(empty=True)
             env.start()
             m = gp.Model(env=env)
-            m.addVar(lb=0.0, ub=1.0)
-            m.setObjective(m.getVars()[0], gp.GRB.MAXIMIZE)
+            v = m.addVar(lb=0.0, ub=1.0)
+            m.setObjective(v, gp.GRB.MAXIMIZE)
             m.optimize()
             return m.status == gp.GRB.OPTIMAL
         else:
             return False
     except Exception:
         return False
+
+
+@pytest.fixture(scope="session")
+def gurobi_licensed():
+    r"""
+    Whether Gurobi can actually solve a trivial LP (installed *and*
+    licensed). Slow-tier cross-solver tests skip when this is False.
+    """
+    return solver_available("gurobi")
 
 
 @pytest.fixture(scope="session", params=["highs", "gurobi"])

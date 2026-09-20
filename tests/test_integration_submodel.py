@@ -14,6 +14,7 @@ provide.
 """
 import json
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -31,7 +32,20 @@ TIMINGS_FILE = os.path.join(REPO_ROOT, "tests", "reference", "timings.json")
 TIMING_TOLERANCE = 3.0
 
 
-def run_compass(tmp_path, *extra_args, timeout=1200):
+def _ensure_gurobi_license_for_main():
+    """
+    compass/main.py requires a license file inside the compass package dir
+    when running with --optimizer gurobi. If the user has dropped a
+    (gitignored) gurobi.lic in the repo root, copy it there.
+    """
+    compass_lic = os.path.join(REPO_ROOT, "compass", "gurobi.lic")
+    if not os.path.exists(compass_lic):
+        root_lic = os.path.join(REPO_ROOT, "gurobi.lic")
+        if os.path.exists(root_lic):
+            shutil.copy(root_lic, compass_lic)
+
+
+def run_compass(tmp_path, *extra_args, timeout=1200, optimizer="highs"):
     """
     Runs compass.main in a subprocess with a fresh temp dir.
 
@@ -41,13 +55,15 @@ def run_compass(tmp_path, *extra_args, timeout=1200):
 
     Returns (subprocess result, output dir).
     """
+    if optimizer == "gurobi":
+        _ensure_gurobi_license_for_main()
     out_dir = os.path.join(str(tmp_path), "out")
     cmd = [
         sys.executable, "-m", "compass.main",
         "--data", DATA_FILE,
         "--species", "homo_sapiens",
         "--model", MODEL_NAME,
-        "--optimizer", "highs",
+        "--optimizer", optimizer,
         "--output-dir", out_dir,
         "--temp-dir", os.path.join(out_dir, "_tmp"),
         "--num-processes", "2",
@@ -135,6 +151,35 @@ class TestTurboPipeline:
         assert not imputed.isnull().any().any()
         # Not a constant matrix
         assert imputed.stack().nunique() > 10
+
+
+@pytest.mark.slow
+class TestCrossSolverParity:
+    """
+    LP objective values are solver-independent: running the same pipeline
+    with Gurobi and with HiGHS must yield (up to solver tolerances) the
+    same reaction scores. This is the strongest end-to-end check that the
+    HiGHS backend is a faithful substitute for Gurobi.
+    """
+
+    def test_gurobi_and_highs_agree(self, tmp_path, gurobi_licensed):
+        if not gurobi_licensed:
+            pytest.skip("Gurobi not available or unlicensed")
+        res_h, out_h = run_compass(os.path.join(str(tmp_path), "h"),
+                                   "--single-sample", "1", optimizer="highs")
+        res_g, out_g = run_compass(os.path.join(str(tmp_path), "g"),
+                                   "--single-sample", "1", optimizer="gurobi")
+        assert res_h.returncode == 0, res_h.stdout[-5000:]
+        assert res_g.returncode == 0, res_g.stdout[-5000:]
+        h = pd.read_csv(os.path.join(out_h, "_tmp", "reactions.txt"),
+                        sep="\t", index_col=0).iloc[:, 0]
+        g = pd.read_csv(os.path.join(out_g, "_tmp", "reactions.txt"),
+                        sep="\t", index_col=0).iloc[:, 0]
+        assert h.index.equals(g.index)
+        assert (h > 0).sum() == (g > 0).sum()  # same reactions are active
+        # Tolerance ~1000x the solver tolerances (1e-9)
+        assert (h - g).abs().max() < 1e-6, (
+            f"max abs diff {(h - g).abs().max():.3e}")
 
 
 @pytest.mark.slow

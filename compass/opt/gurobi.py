@@ -49,9 +49,10 @@ class GurobiOptimizer(Optimizer):
         Builds the initial Gurobi model from the provided metabolic model.
         """
         # Gurobi WLS License
-        if 'WLSACCESSID' in self.credentials and 'WLSSECRET' in self.credentials and 'LICENSEID' in self.credentials:
-            env = gp.Env(params=self.credentials)
-        # Gurobi Named-User License
+        credentials = self.credentials or {}
+        if 'WLSACCESSID' in credentials and 'WLSSECRET' in credentials and 'LICENSEID' in credentials:
+            env = gp.Env(params=credentials)
+        # Gurobi Named-User License (or file-based license in the working dir)
         else:
             env = gp.Env()
 
@@ -153,11 +154,13 @@ class GurobiOptimizer(Optimizer):
         self.gp_model.optimize()
 
         status = self.gp_model.Status
-        obj_value = self.gp_model.ObjVal
         if self.gp_model.Status == GRB.OPTIMAL:
             success = True
+            obj_value = self.gp_model.ObjVal
         else:
+            # ObjVal does not exist for non-optimal solves (e.g. infeasible)
             success = False
+            obj_value = None
 
         # Revert the delta
 
