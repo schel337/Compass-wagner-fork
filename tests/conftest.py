@@ -1,6 +1,8 @@
 """
 Shared fixtures for the Compass test suite.
 """
+import os
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -81,35 +83,102 @@ def tiny_model():
     return build_chain_model()
 
 
-def make_expression_df(n_cells=16, n_genes=200, seed=0):
+def make_chain_expression_df():
     r"""
-    Generates a synthetic expression DataFrame in the same units Compass
-    expects (CPM-like scaled values): one row per gene, one column per cell.
+    Generates the synthetic expression DataFrame for the chain model.
 
-    Gene expression levels are drawn log-normally so that a few genes are
-    highly expressed, mirroring the heavy-tailed distribution of real
-    scRNA-seq CPM data.
+    Two cells are defined, with hand-computable reaction penalties
+    (lambda=0, so penalty = 1 / (1 + log2(1 + expression))):
+
+      CELL_EXPRESSED: GENE_A/B/C all expressed at 3.0
+          -> log2(1+3) = 2 -> penalty 1/3 for R1_pos, R2_pos, R2_neg, R3_pos
+      CELL_ZERO: everything unexpressed
+          -> log2(1+0) = 0 -> penalty 1.0 (the "inaccessible" value)
+
+    Reactions without gene associations (E1_pos, E4_pos) always get
+    penalty 1.0. A filler gene verifies that genes not in the model
+    are ignored.
     """
-    rng = np.random.default_rng(seed)
-    genes = [f"GENE_{i:04d}" for i in range(n_genes)]
-    cells = [f"CELL_{i:04d}" for i in range(n_cells)]
-    log_means = rng.normal(-4.0, 2.0, size=n_genes)
-    data = np.clip(np.exp(log_means[:, None] + rng.normal(0.0, 0.5, size=(n_genes, n_cells))), 0.0, None)
-    # Scale columns to CPM-like totals
-    data = data / data.sum(axis=0) * 1e5
-    return pd.DataFrame(data, index=genes, columns=cells)
+    return pd.DataFrame({
+        "CELL_EXPRESSED": {"GENE_A": 3.0, "GENE_B": 3.0, "GENE_C": 3.0, "FILLER": 1.0},
+        "CELL_ZERO": {"GENE_A": 0.0, "GENE_B": 0.0, "GENE_C": 0.0, "FILLER": 0.0},
+    })
 
 
 @pytest.fixture()
-def expression_df():
-    return make_expression_df()
-
-
-@pytest.fixture()
-def expression_file(tmp_path, expression_df):
+def expression_file(tmp_path):
+    """The chain-model expression matrix as a TSV readable by utils.read_data."""
     path = tmp_path / "expression.tsv"
-    expression_df.to_csv(path, sep="\t")
+    make_chain_expression_df().to_csv(path, sep="\t")
     return str(path)
+
+
+@pytest.fixture()
+def chain_model_loader(monkeypatch):
+    r"""
+    Patches compass.models.load_metabolic_model so that init_model() returns
+    a freshly built chain model regardless of the requested name. Both
+    eval_reaction_penalties and singleSampleCompass load the model through
+    init_model, so patching the loader exercises the full pipeline in-memory
+    without a model on disk. Each call rebuilds the model, so the two
+    pipeline stages (and different tests) cannot leak state into each other.
+    """
+    import compass.models
+    from compass.globals import MODEL_DIR
+
+    def load(name, species="homo_sapiens", metabolic_model_dir=MODEL_DIR):
+        return build_chain_model()
+
+    monkeypatch.setattr(compass.models, "load_metabolic_model", load)
+    return load
+
+
+@pytest.fixture()
+def compass_args(tmp_path):
+    r"""
+    An args dict mirroring parseArgs() defaults (plus test-specific values)
+    with every key read by the penalty stage (eval_reaction_penalties) and
+    the scoring stage (singleSampleCompass) of compass.main.compass_work.
+
+    lambda=0 means no TSNE/kNN sample blending: penalties are purely per-cell,
+    which is what makes them hand-computable.
+    """
+    temp_dir = str(tmp_path / "temp")
+    return {
+        # penalty stage
+        'lambda': 0,
+        'num_neighbors': 30,
+        'symmetric_kernel': False,
+        'input_weights': None,
+        'penalty_diffusion': 'knn',
+        'and_function': 'mean',
+        'input_knn': None,
+        'output_knn': None,
+        'latent_space': None,
+        'num_processes': 1,
+        # model / data
+        'model': 'TinyChain',
+        'species': 'homo_sapiens',
+        'media': None,
+        'isoform_summing': 'remove-summing',
+        # scoring stage
+        'no_reactions': False,
+        'calc_metabolites': False,
+        'test_mode': False,
+        'detailed_perf': False,
+        'generate_cache': False,
+        'save_argmaxes': False,
+        'save_argmaxes_dir': None,
+        'select_reactions': None,
+        'select_subsystems': None,
+        # plumbing
+        'temp_dir': temp_dir,
+        'penalties_dir': os.path.join(temp_dir, 'penalties_tmp', 'penalties'),
+        # optimizer (tests set this via parameterization)
+        'optimizer': 'highs',
+        'num_threads': None,
+        'lpmethod': None,
+    }
 
 
 def solver_available(name: str) -> bool:
@@ -166,3 +235,15 @@ def optimizer(request, tiny_model):
     elif name == "gurobi":
         from compass.opt.gurobi import GurobiOptimizer, get_gurobi_config
         return GurobiOptimizer(tiny_model, get_gurobi_config())
+
+
+@pytest.fixture(params=["highs", "gurobi"])
+def solver(request):
+    r"""
+    Like ``optimizer`` but yields only the solver *name* (for tests that
+    build their own optimizer, e.g. through initialize_optimization).
+    Skips when the solver is not installed or unlicensed.
+    """
+    if not solver_available(request.param):
+        pytest.skip(f"{request.param} solver not available or unlicensed")
+    return request.param

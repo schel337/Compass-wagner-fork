@@ -14,7 +14,7 @@ import numpy as np
 
 from compass.models.MetabolicModel import MetabolicModel, Reaction
 from compass.opt.base import LinearProgramDelta, Optimizer, Solution
-# NOTE: gurobi/cuopt are imported lazily in initialize_optimization so that
+# NOTE: solver backends are imported lazily in initialize_optimization so that
 # using one optimizer does not require the others to be installed.
 from .. import utils
 from .. import models
@@ -22,9 +22,6 @@ from . import cache
 from ..globals import BETA, EXCHANGE_LIMIT, LICENSE_DIR, MODEL_DIR
 from .cache import PREPROCESS_CACHE_DIR
 import compass.global_state as global_state
-
-import gurobipy as gp
-from gurobipy import GRB
 
 logger = logging.getLogger("compass")
 

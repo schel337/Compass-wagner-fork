@@ -13,8 +13,6 @@ from .globals import LICENSE_DIR, MODEL_DIR
 import os
 import anndata
 
-import gurobipy as gp
-
 MULTIPROCESSING_CONFIGURED = False
 
 def create_process_pool(args):
@@ -32,6 +30,9 @@ def get_steadystate_constraints(model, gp_model):
     """
     Uses the s_mat to define connectivity constraints
     """
+    # Lazy import so that utils (and everything that imports it) works
+    # without gurobipy installed, e.g. when using the HiGHS backend.
+    import gurobipy as gp
 
     # s_mat is a dictionary with metabolites as keys and list of (reactions, stoichiometric coefficients) as values
     s_mat = model.getSMAT()

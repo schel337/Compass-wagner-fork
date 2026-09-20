@@ -137,3 +137,51 @@ def test_infeasible_delta_reports_failure(optimizer):
     sol2 = optimizer.solve(LinearProgramDelta(objective={'E1_pos': 1.0}, sense="max"))
     assert sol2.success
     assert sol2.obj_value == pytest.approx(1.0, abs=1e-6)
+
+
+def test_sequential_solves_keep_objective_correct(optimizer):
+    """Many consecutive solves on one optimizer must each report the
+    analytically correct objective value, including solves whose objective
+    references an added variable and whose bound changes target base
+    reactions.
+
+    Regression test: in highspy >= 1.15, getColByName intermittently returns
+    HighsStatus.kError together with an *uninitialized* index (values in the
+    32764-32767 range, i.e. freed memory) once the model has gone through
+    addVariable()/deleteVariable() rounds, and the wrapper swallows the
+    error. If solve() ever resolves reaction names through getColByName,
+    changeColBounds/changeColsCost on such an index silently no-ops and the
+    LP is solved with the wrong objective or bounds while still reporting
+    "Optimal". With the (broken) name-lookup path, the uptake-minimisation
+    case below returns 0.0 instead of 1.9.
+    """
+    p = {'R1_pos': 1/3, 'R2_pos': 1/3, 'R2_neg': 1/3, 'R3_pos': 1/3, 'E1_pos': 1.0, 'E4_pos': 1.0}
+    cases = [
+        # max secretion with uptake available and E1 blocked -> M1U=M1S=1
+        (dict(objective={'M1_SECRETION': 1.0}, sense='max',
+              added_uptake={'M1': 'M1_UPTAKE'}, added_secretion={'M1': 'M1_SECRETION'},
+              blocked_reactions={'E1_pos'}), 1.0),
+        # min penalty dict with E1 blocked and M1S >= 0.95; uptake/secretion
+        # carry no penalty -> R1=R2=R3=E4=0, M1U=M1S=0.95 -> 0.0
+        (dict(objective=p, sense='min',
+              added_uptake={'M1': 'M1_UPTAKE'}, added_secretion={'M1': 'M1_SECRETION'},
+              blocked_reactions={'E1_pos'}, high_flux={'M1_SECRETION': 0.95}), 0.0),
+        # max uptake -> 1.0
+        (dict(objective={'M1_UPTAKE': 1.0}, sense='max',
+              added_uptake={'M1': 'M1_UPTAKE'}, added_secretion={'M1': 'M1_SECRETION'},
+              blocked_reactions={'M1_SECRETION'}), 1.0),
+        # min penalty dict with M1U >= 0.95 and secretion blocked: the chain
+        # is forced to 0.95 -> 0.95*(1/3+1/3+1/3+1) = 1.9
+        (dict(objective=p, sense='min',
+              added_uptake={'M1': 'M1_UPTAKE'}, added_secretion={'M1': 'M1_SECRETION'},
+              blocked_reactions={'M1_SECRETION'}, high_flux={'M1_UPTAKE': 0.95}), 1.9),
+        # first case again, after another add/delete round -> 1.0
+        (dict(objective={'M1_SECRETION': 1.0}, sense='max',
+              added_uptake={'M1': 'M1_UPTAKE'}, added_secretion={'M1': 'M1_SECRETION'},
+              blocked_reactions={'E1_pos'}), 1.0),
+    ]
+    for i, (d, expected) in enumerate(cases):
+        sol = optimizer.solve(LinearProgramDelta(**d))
+        assert sol.success, f"solve #{i} failed: {sol.status}"
+        assert sol.obj_value == pytest.approx(expected, abs=1e-6), \
+            f"solve #{i} returned {sol.obj_value}, expected {expected}"

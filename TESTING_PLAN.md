@@ -129,3 +129,21 @@ Estimated effort: 1–2 days for tiers 1–4, another 1–2 days for integration
 | Unit + turbo_mc + micro-model chain | none / HiGHS | synthetic, committed | < 2 min | every PR, no secrets |
 | Integration (submodel or `--reaction-range` subset, 1 sample) | HiGHS | synthetic + bundled Th17 (one test) | ~5–10 min | every PR |
 | Cross-solver consistency + timing baselines | HiGHS + Gurobi (WLS secret) | same subset | ~10–20 min | nightly |
+
+## 8. Status (implemented on `test-infrastructure`) and notable findings
+
+### 8.1 What exists now
+- `tests/conftest.py`: `build_chain_model()` (analytic 6-reaction chain), `make_chain_expression_df()`, `tiny_model`, `expression_file`, `chain_model_loader`, `compass_args`, `optimizer`/`solver` (parametrized highs/gurobi, skips when unavailable). `solver_available()` probes each backend with a trivial LP.
+- `tests/test_optimizer.py`: reaction maxima, uptake/secretion maxima, delta apply/revert "tabula rasa" invariants, infeasibility reporting, and `test_sequential_solves_keep_objective_correct` (see bug below).
+- `tests/test_single_sample_compass.py` (micro tier, both solvers): penalty stage vs hand computation (λ=0 ⇒ 1/3 vs 1), `singleSampleCompass` scoring stage vs analytic ground truth (forcing any exchange-limited chain reaction to BETA·r_max forces the whole chain ⇒ score = BETA·(3·p_int + 2·p_E) = 2.85/4.75; R2_neg short-circuits to 0), score ordering, second-run no-op, solver-free penalty stage.
+- `tests/test_integration_submodel.py` (slow): end-to-end subprocess runs on the ~190-reaction committed RECON2.2 submodel, cross-solver parity (HiGHS vs Gurobi reaction scores within 1e-6), timing smoke baselines (`tests/reference/timings.json`).
+- Measured fast-tier coverage after the micro-tier tests: `compass/compass/algorithm.py` 9%→63%, `penalties.py` 12%→42%, `opt/highs.py` 98%, `opt/gurobi.py` 99%.
+
+### 8.2 Bug found by the tests: highspy name lookup after variable deletion
+`highspy` (1.15.1, the MIT wheel used for the license-free HiGHS backend) corrupts name-based column lookup once a model has gone through `addVariable()`/`deleteVariable()` rounds and variables are re-added under previously-used names: `getColByName()` then returns `HighsStatus.kError` **together with an uninitialized index** (observed 32764–32767, i.e. freed memory), and the Python wrapper does not check the status. `HighsOptimizer.solve()` used to resolve reaction names through `getColByName` on every solve, so after the first add/delete round the objective coefficients and bound changes were silently applied to garbage indices — the LPs were solved with the wrong objective/bounds while still reporting "Optimal" (every downstream penalty score silently wrong). This is exactly the silent-failure class the test pyramid exists to catch, and it was invisible to the integration tier alone because the submodel run happened not to trigger the corruption in that one execution path.
+
+Fix (in `compass/opt/highs.py`): variable handles are cached at model build time (base-variable indices are stable because added variables are always appended and deleted in descending index order), and per-solve name resolution uses that cache plus the handles returned by `addVariable()`. No `getColByName` is ever called during `solve()`. `test_sequential_solves_keep_objective_correct` pins analytic objective values across five consecutive solves with added variables and fails on the old code path (HiGHS: 0.0 instead of 1.9).
+
+**Upgrading does not fix it.** The mechanism is in the HiGHS C++ core, not the Python wrapper: `deleteColsInterface()` clears the name hash, `passColName()` only updates it incrementally (leaving it non-empty but incomplete), and `getColByName()` re-forms the hash only when it is empty, then returns an *uninitialized* index on error. highspy 1.15.1 is the latest release on PyPI, and a from-source build of HiGHS master (73cac48, 2026-08-19) still reproduces the bug. Standalone repro: `scripts/repro_highspy_getcolbyname.py` (exit 1 while broken); suite-tracked as `tests/test_upstream_bugs.py` (xfail, flips when upstream fixes it).
+
+**Takeaway:** when driving a solver through a thin wrapper, always check the returned status and prefer index/handle-based access over name-based access on models that are mutated between solves.
