@@ -181,6 +181,15 @@ def compass_args(tmp_path):
     }
 
 
+# Prefer the repo's WLS license if present. Without GRB_LICENSE_FILE the pip
+# wheel's bundled size-limited license (in gurobipy/.libs) silently wins over
+# the license in $HOME, capping models at 2000 vars / 200 quadratic vars.
+_GUROBI_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_GUROBI_LIC = os.path.join(_GUROBI_ROOT, "gurobi.lic")
+if os.path.isfile(_GUROBI_LIC):
+    os.environ.setdefault("GRB_LICENSE_FILE", _GUROBI_LIC)
+
+
 def solver_available(name: str) -> bool:
     r"""
     Checks that a solver can actually solve a trivial LP (i.e. it is
