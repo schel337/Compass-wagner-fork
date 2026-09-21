@@ -154,6 +154,108 @@ class TestTurboPipeline:
 
 
 @pytest.mark.slow
+class TestKoFeatureCombo:
+    """
+    In-silico KO feature (--block-reactions / --activity-file) combined
+    with Turbo-Compass. Turbo's oracle re-runs the full compass.main
+    entry point in-process for every observed matrix entry, so the KO
+    flags must survive the round trip through the oracle's per-iteration
+    argument re-parsing and its in-process cache state.
+
+    The KO target is R_GLCGLUT2_pos (glucose uptake, a live reaction
+    with baseline v_r^opt = 1000 in the committed SubModel_cc cache).
+    """
+
+    KO_RXN = "R_GLCGLUT2_pos"
+    KO_SIBLING = "R_L_LACt4r_pos"  # live reaction, baseline v_r^opt = 1000
+    BASELINE_V_R_OPT = 1000.0
+    COMMITTED_CACHE = os.path.join(REPO_ROOT, "compass", "Resources", "COMPASS",
+                                   MODEL_NAME, "default-media", "preprocess.json")
+
+    def _turbo_args(self):
+        return ("--turbo", "0.9", "--turbo-increments", "0.1",
+                "--turbo-max-iters", "2")
+
+    def test_turbo_with_activity_file(self, tmp_path):
+        """Paired-run Run-B leg via Turbo: max problems are not solved."""
+        # Activity file simulating Run A's KO'd cache: the baseline values
+        # with the KO reaction zeroed.
+        with open(self.COMMITTED_CACHE) as f:
+            baseline = json.load(f)
+        assert abs(baseline[self.KO_RXN] - self.BASELINE_V_R_OPT) < 1e-9
+        act = tmp_path / "activity.tsv"
+        with open(act, "w") as f:
+            for rxn, val in sorted(baseline.items()):
+                f.write(f"{rxn}\t{val if rxn != self.KO_RXN else 0.0}\n")
+
+        result, out_dir = run_compass(tmp_path, *self._turbo_args(),
+                                      "--activity-file", str(act),
+                                      timeout=2400)
+        assert result.returncode == 0, result.stdout[-5000:]
+        assert "Turbo Compass completed successfully!" in result.stdout
+        # The activity file was honored: cache check skipped in the oracle
+        # and the per-reaction max problems were not solved in the
+        # oracle's in-process compass runs
+        assert "skipping cache check" in result.stdout
+        assert "will not be solved" in result.stdout
+
+        imputed = pd.read_csv(os.path.join(out_dir, "reactions.tsv"),
+                              sep="\t", index_col=0)
+        assert not imputed.isnull().any().any()
+        # The KO reaction's activity target is 0, so it is skipped in
+        # every oracle run: score 0 in every observed cell, and constant
+        # columns are imputed exactly as their constant value
+        assert (imputed.loc[self.KO_RXN].abs() < 1e-6).all()
+        # ... while a control reaction keeps its normal activity target
+        # and scores as usual
+        assert (imputed.loc[self.KO_SIBLING] > 0).any()
+
+    def test_turbo_with_block_reactions(self, tmp_path):
+        """Paired-run Run-A leg via Turbo: KO blocked in every oracle LP."""
+        ko = tmp_path / "ko.txt"
+        ko.write_text("R_GLCGLUT2\n")
+        cache_dir = str(tmp_path / "runA_cache")
+
+        # Step 1: build Run A's (KO'd) cache in an isolated dir
+        result, _ = run_compass(
+            tmp_path / "precache",
+            "--single-sample", "3", "--precache",
+            "--block-reactions", str(ko),
+            "--preprocess-cache-dir", cache_dir,
+            timeout=1200)
+        assert result.returncode == 0, result.stdout[-5000:]
+        a_cache = json.load(open(os.path.join(cache_dir, MODEL_NAME,
+                                              "default-media", "preprocess.json")))
+        # The KO zeroed its own max LP; siblings are unaffected
+        assert abs(a_cache[self.KO_RXN]) < 1e-9
+        assert abs(a_cache[self.KO_SIBLING] - self.BASELINE_V_R_OPT) < 1e-9
+
+        # Step 2: Turbo with the KO applied to every oracle LP, reading
+        # Run A's cache
+        result, out_dir = run_compass(
+            tmp_path / "turbo",
+            *self._turbo_args(),
+            "--block-reactions", str(ko),
+            "--preprocess-cache-dir", cache_dir,
+            timeout=2400)
+        assert result.returncode == 0, result.stdout[-5000:]
+        assert "Turbo Compass completed successfully!" in result.stdout
+        # The oracle's compass runs applied the KO to their LPs ...
+        assert "in-silico KO" in result.stdout
+        # ... and their max problems were solved (from Run A's cache),
+        # not overridden
+        assert "will not be solved" not in result.stdout
+
+        imputed = pd.read_csv(os.path.join(out_dir, "reactions.tsv"),
+                              sep="\t", index_col=0)
+        assert not imputed.isnull().any().any()
+        # KO reaction: blocked in every LP and its (KO'd) activity target
+        # is 0 -> skipped -> 0 in every observed cell -> imputed row is 0
+        assert (imputed.loc[self.KO_RXN].abs() < 1e-6).all()
+        assert (imputed.loc[self.KO_SIBLING] > 0).any()
+
+
+@pytest.mark.slow
 class TestCrossSolverParity:
     """
     LP objective values are solver-independent: running the same pipeline
