@@ -92,7 +92,9 @@ def get_cuopt_config(threads: int | None = None, method: int | None = None) -> d
     return {
         # N.B. cuopt does not actually respect this flag, but should be resolved in coming PR
         CUOPT_LOG_TO_CONSOLE: False,
-        CUOPT_PRESOLVE: False,
+        # cuOpt 26.8 requires the integer enum: 0 disables presolve.
+        # Keep this disabled to preserve the backend's existing intent.
+        CUOPT_PRESOLVE: 0,
         CUOPT_NUM_CPU_THREADS: threads,
         # TODO: NVIDIA does not really explain these, but their docs indicate stable3 is generally the best
         CUOPT_PDLP_SOLVER_MODE: PDLPSolverMode.Stable3,
