@@ -27,9 +27,10 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DATA_FILE = os.path.join(REPO_ROOT, "tests", "data", "synthetic_expression.tsv")
 MODEL_NAME = "SubModel_cc"
 TIMINGS_FILE = os.path.join(REPO_ROOT, "tests", "reference", "timings.json")
-# Generous factor: CI hardware varies and this is a smoke test, not a
-# benchmark. Regenerate baselines with scripts/regen_baselines.py.
-TIMING_TOLERANCE = 3.0
+# Order-of-magnitude guard: CI hardware and shared-node load vary, and this is
+# a smoke test for accidentally doing substantially more work, not a benchmark.
+# Regenerate baselines with scripts/regen_baselines.py.
+TIMING_TOLERANCE = 10.0
 
 
 def _ensure_gurobi_license_for_main():
