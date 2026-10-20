@@ -410,8 +410,12 @@ def parseArgs():
                         choices=["gurobi", "cuopt", "highs"],
                         default="gurobi")
 
-    # Parse known args first to check for optimizer setting
-    args, _ = parser.parse_known_args()
+    # Parse known args first to check for optimizer setting, then reject any
+    # leftovers. Silently ignoring an unknown option can make a run use
+    # defaults instead of the values the caller intended.
+    args, unknown_args = parser.parse_known_args()
+    if unknown_args:
+        parser.error("unrecognized arguments: " + " ".join(unknown_args))
 
     if args.optimizer == "cuopt":
         default_method = 1 #pdlp 
