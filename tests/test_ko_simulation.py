@@ -43,6 +43,7 @@ import json
 import os
 import subprocess
 import sys
+from copy import deepcopy
 from unittest import mock
 
 import pandas as pd
@@ -246,8 +247,8 @@ class TestBlockReactionsFile:
 
 
 class TestApplyBlockedReactions:
-    def test_applies_zero_bounds_only_to_present_directions(self):
-        model = build_chain_model()
+    def test_applies_zero_bounds_only_to_present_directions(self, tiny_model):
+        model = deepcopy(tiny_model)
         model.reactions['R2_pos'].lower_bound = 0.25
 
         applied = algorithm.apply_blocked_reactions(
@@ -670,13 +671,14 @@ class TestKoPairedRunWrapper:
         )
         assert result.returncode == 0, result.stdout[-10000:]
 
-        # Run A log: the KO was applied to every LP ... the blocking log
+        # Run A log: the KO was applied to every LP ... the applied-bounds
         # line lists exactly the directed IDs present in the model ...
         with open(os.path.join(out_dir, "with_ko", "compass.log")) as f:
             log_a = f.read()
-        blocking_lines = [ln for ln in log_a.splitlines() if "in-silico KO" in ln]
-        assert any(f"{self.KO}_pos" in ln for ln in blocking_lines)
-        assert all(f"{self.KO}_neg" not in ln for ln in blocking_lines)
+        applied_lines = [ln for ln in log_a.splitlines()
+                         if "Applied zero-flux bounds to" in ln]
+        assert any(f"{self.KO}_pos" in ln for ln in applied_lines)
+        assert all(f"{self.KO}_neg" not in ln for ln in applied_lines)
         # ... and the nonexistent R_GLCGLUT2_neg direction was filtered
         # (dropped with a log message) against the model
         assert any("Ignoring" in ln and f"{self.KO}_neg" in ln
@@ -695,7 +697,8 @@ class TestKoPairedRunWrapper:
         # The KO reaction itself: its max LP was blocked in Run A, so
         # v_r^opt = 0 (baseline is 1000 - the activity file proves the
         # KO was active in Run A's maximization LPs, not a model trait)
-        # and its score is 0 in both runs ...
+        # and its score is 0 in Run A. Run B uses the default patched
+        # target (1.0), so the unblocked reaction can score above zero ...
         activities = pd.read_csv(os.path.join(out_dir, "activity_v_r_opt.tsv"),
                                  sep="\t", index_col=0, comment="#")
         assert abs(activities.loc[f"{self.KO}_pos"].iloc[0]) < 1e-9
@@ -707,7 +710,7 @@ class TestKoPairedRunWrapper:
             assert abs(activities.loc[control].iloc[0] - self.BASELINE_V_R_OPT) < 1e-9
 
         assert comparison.loc[f"{self.KO}_pos", "with_ko"] == 0.0
-        assert comparison.loc[f"{self.KO}_pos", "no_ko"] == 0.0
+        assert comparison.loc[f"{self.KO}_pos", "no_ko"] > 0.0
         for control in self.CONTROLS:
             assert abs(comparison.loc[control, "with_ko"] - comparison.loc[control, "no_ko"]) < 1e-9
 

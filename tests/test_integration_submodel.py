@@ -241,8 +241,8 @@ class TestKoFeatureCombo:
             timeout=2400)
         assert result.returncode == 0, result.stdout[-5000:]
         assert "Turbo Compass completed successfully!" in result.stdout
-        # The oracle's compass runs applied the KO to their LPs ...
-        assert "in-silico KO" in result.stdout
+        # The oracle's Compass runs applied zero-flux bounds for the KO ...
+        assert "Applied zero-flux bounds to 1 reaction direction(s)" in result.stdout
         # ... and their max problems were solved (from Run A's cache),
         # not overridden
         assert "will not be solved" not in result.stdout
