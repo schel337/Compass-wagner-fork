@@ -138,6 +138,8 @@ def seed_module_caches(source_root, destination_root, module_names, media,
     directions are ignored because a reaction may be one-way or absent from a
     selected module; the KO file is not validated against each partition.
     """
+    from compass.compass.activity import patch_activity_values
+
     raw_rows = []
     control_rows = []
     patched_count = 0
@@ -153,11 +155,9 @@ def seed_module_caches(source_root, destination_root, module_names, media,
         if not values:
             raise ValueError(f"Run A's activity cache is empty for module {module!r}: {source}")
 
-        control_values = dict(values)
-        for reaction_id in blocked_reactions:
-            if reaction_id in control_values:
-                control_values[reaction_id] = patch_value
-                patched_count += 1
+        control_values, patched_reactions = patch_activity_values(
+            values, blocked_reactions, patch_value)
+        patched_count += len(patched_reactions)
 
         destination = os.path.join(destination_root, relative_path)
         os.makedirs(os.path.dirname(destination), exist_ok=True)
@@ -266,7 +266,7 @@ def main():
 
     ko_file = os.path.abspath(args.block_reactions)
     sys.path.insert(0, REPO_ROOT)
-    from compass.compass.activity import read_block_reactions_file
+    from compass.compass.activity import patch_activity_values, read_block_reactions_file
     blocked_reactions = read_block_reactions_file(ko_file)
     module_selection = (os.path.abspath(args.select_meta_subsystems)
                         if args.select_meta_subsystems else None)
@@ -343,12 +343,8 @@ def main():
         os.makedirs(dst_cache_dir, exist_ok=True)
         with open(src_cache) as fin:
             raw_values = json.load(fin)
-        control_values = dict(raw_values)
-        patched_ids = []
-        for reaction_id in blocked_reactions:
-            if reaction_id in control_values:
-                control_values[reaction_id] = args.patch_value
-                patched_ids.append(reaction_id)
+        control_values, patched_ids = patch_activity_values(
+            raw_values, blocked_reactions, args.patch_value)
         with open(os.path.join(dst_cache_dir, "preprocess.json"), "w") as fout:
             json.dump(control_values, fout, indent=1, sort_keys=True)
         write_activity_audit(

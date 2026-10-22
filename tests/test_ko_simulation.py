@@ -53,6 +53,7 @@ from compass import utils
 from compass.compass import algorithm, cache
 from compass.compass.activity import (
     export_activity_file,
+    patch_activity_values,
     read_activity_file,
     read_block_reactions_file,
 )
@@ -242,6 +243,50 @@ class TestBlockReactionsFile:
     def test_missing_file(self, tmp_path):
         with pytest.raises(FileNotFoundError):
             read_block_reactions_file(str(tmp_path / "nope.txt"))
+
+
+class TestApplyBlockedReactions:
+    def test_applies_zero_bounds_only_to_present_directions(self):
+        model = build_chain_model()
+        model.reactions['R2_pos'].lower_bound = 0.25
+
+        applied = algorithm.apply_blocked_reactions(
+            {'block_reactions': ['R2_pos', 'R2_neg', 'MISSING_pos']}, model)
+
+        assert applied == {'R2_pos', 'R2_neg'}
+        for reaction_id in ('R2_pos', 'R2_neg'):
+            assert model.reactions[reaction_id].lower_bound == 0.0
+            assert model.reactions[reaction_id].upper_bound == 0.0
+
+    def test_ignores_absent_direction_of_one_way_reaction(self):
+        model = build_branch_model()
+        assert 'R2_pos' in model.reactions
+        assert 'R2_neg' not in model.reactions
+
+        applied = algorithm.apply_blocked_reactions(
+            {'block_reactions': ['R2_pos', 'R2_neg']}, model)
+
+        assert applied == {'R2_pos'}
+        assert model.reactions['R2_pos'].lower_bound == 0.0
+        assert model.reactions['R2_pos'].upper_bound == 0.0
+
+
+class TestPatchActivityValues:
+    def test_patches_present_directions_without_mutating_raw_values(self):
+        raw = {'R1_pos': 0.0, 'R1_neg': 0.0, 'OTHER_pos': 2.5}
+
+        control, patched = patch_activity_values(
+            raw, {'R1_pos', 'R1_neg', 'MISSING_pos'}, patch_value=0.6)
+
+        assert raw == {'R1_pos': 0.0, 'R1_neg': 0.0, 'OTHER_pos': 2.5}
+        assert control == {'R1_pos': 0.6, 'R1_neg': 0.6, 'OTHER_pos': 2.5}
+        assert patched == {'R1_pos', 'R1_neg'}
+
+    def test_default_patch_value_is_one(self):
+        control, patched = patch_activity_values({'R1_pos': 0.0}, {'R1_pos'})
+
+        assert control == {'R1_pos': 1.0}
+        assert patched == {'R1_pos'}
 
 
 class TestActivityFile:

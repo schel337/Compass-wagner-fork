@@ -96,6 +96,19 @@ def read_activity_file(path):
     return activities
 
 
+def patch_activity_values(activities, blocked_reactions, patch_value=1.0):
+    """Return a copied activity mapping with present blocked directions patched.
+
+    Directions absent from the supplied activity mapping are ignored. This is
+    expected for one-way reactions and module-scoped caches.
+    """
+    patched_activities = dict(activities)
+    patched_reactions = set(blocked_reactions) & set(patched_activities)
+    for reaction_id in patched_reactions:
+        patched_activities[reaction_id] = patch_value
+    return patched_activities, patched_reactions
+
+
 def export_activity_file(model, media, out_path,
                          preprocess_cache_dir=cache.PREPROCESS_CACHE_DIR):
     """
