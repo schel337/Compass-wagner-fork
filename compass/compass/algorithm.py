@@ -500,37 +500,33 @@ def compass_reactions(
 def initialize_optimization(model: MetabolicModel, args) -> Optimizer:
     """
     Builds a flux balance analysis model from the specified metabolic model.
-    Uses args to determine which optimizer will be used and how to configure it.
-
-    If args contains 'block_reactions' (a set of directed reaction IDs from
-    a --block-reactions file), those reactions are blocked in every problem
-    solved by the returned optimizer, implementing an in-silico metabolic
-    knockout. Unrecognized IDs are dropped (with a log message), matching
-    the convention of --select-reactions.
+    Applies run-level KO bounds to the model before constructing the optimizer,
+    so scoring and precaching use the same effective model.
     """
     num_threads = args.get('num_threads')
     lpmethod = args.get('lpmethod')
-    blocked_reactions = resolve_blocked_reactions(args, model)
+    apply_blocked_reactions(args, model)
     if args['optimizer'] == "gurobi":
         from compass.opt.gurobi import GurobiOptimizer, get_gurobi_config
         credentials = utils.get_gurobi_credentials()
         config = get_gurobi_config(num_threads, lpmethod)
-        return GurobiOptimizer(model, config, credentials=credentials,
-                               blocked_reactions=blocked_reactions)
+        return GurobiOptimizer(model, config, credentials=credentials)
     elif args['optimizer'] == "cuopt":
         from compass.opt.cuopt import CuoptOptimizer, get_cuopt_config
         config = get_cuopt_config(num_threads, method=lpmethod)
-        return CuoptOptimizer(model, config, blocked_reactions=blocked_reactions)
+        return CuoptOptimizer(model, config)
     elif args['optimizer'] == "highs":
         from compass.opt.highs import HighsOptimizer, get_highs_config
         config = get_highs_config(num_threads, lpmethod)
-        return HighsOptimizer(model, config, blocked_reactions=blocked_reactions)
+        return HighsOptimizer(model, config)
 
 
-def resolve_blocked_reactions(args, model: MetabolicModel) -> set[str]:
+def apply_blocked_reactions(args, model: MetabolicModel) -> set[str]:
     """
-    Resolves the run-level (in-silico KO) block list from args to the set of
-    directed reaction IDs actually present in the model.
+    Resolves run-level KO directions present in this model and sets their
+    effective bounds to zero. Undirected inputs may expand to two directions;
+    absent directions, including those outside a selected Module-Compass
+    partition, are ignored.
 
     args['block_reactions'] may be a list/set of directed IDs already parsed
     from a --block-reactions file, or the file path itself (e.g. when the
@@ -545,11 +541,17 @@ def resolve_blocked_reactions(args, model: MetabolicModel) -> set[str]:
     valid = blocked & set(model.reactions.keys())
     ignored = blocked - valid
     if ignored:
-        logger.info("Ignoring %d unrecognized reaction IDs in the block reactions list: %s",
-                    len(ignored), sorted(ignored))
+        logger.info("Ignoring %d block-reaction directions absent from model %s: %s",
+                    len(ignored), model.name, sorted(ignored))
     if valid:
-        logger.info("Blocking %d reactions in every LP (in-silico KO): %s",
-                    len(valid), sorted(valid))
+        # Apply the KO to the model so scoring and v_r^opt precaching see the
+        # same bounds. Set both bounds to guarantee zero flux even if the
+        # original model assigned a nonzero lower bound.
+        for rxn_id in valid:
+            model.reactions[rxn_id].lower_bound = 0.0
+            model.reactions[rxn_id].upper_bound = 0.0
+        logger.info("Applied zero-flux bounds to %d reaction direction(s) in model %s: %s",
+                    len(valid), model.name, sorted(valid))
     return valid
 
 

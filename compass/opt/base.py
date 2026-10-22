@@ -55,21 +55,14 @@ class Optimizer(abc.ABC):
     Abstract base class for an optimization solver.
     """
 
-    def __init__(self, model: MetabolicModel, blocked_reactions: set[str] | None = None):
+    def __init__(self, model: MetabolicModel):
         self.model = model
-        # Reactions that are blocked for the lifetime of this optimizer,
-        # in addition to any per-problem delta.blocked_reactions. Used for
-        # simulating in-silico metabolic knockouts: the KO reactions must
-        # carry no flux in *any* problem (maximization or penalty
-        # minimization), including the per-reaction v_r^opt maximizations.
-        self.blocked_reactions = set(blocked_reactions) if blocked_reactions else set()
 
     @abc.abstractmethod
     def solve(self, delta: LinearProgramDelta) -> Solution:
         """
         Solve the linear program with the delta applied.
-        Implementations must block the union of delta.blocked_reactions
-        and self.blocked_reactions.
+        Implementations must apply delta.blocked_reactions for this solve.
         If possible, the problem should be restored to the base state after.
         """
         pass

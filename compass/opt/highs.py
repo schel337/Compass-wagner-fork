@@ -27,9 +27,8 @@ class HighsOptimizer(Optimizer):
     HiGHS-based implementation of the Optimizer.
     """
 
-    def __init__(self, model: MetabolicModel, config: dict[str, Any] | None = None, credentials: dict[str, str] | None = None,
-                 blocked_reactions: set[str] | None = None):
-        super().__init__(model, blocked_reactions=blocked_reactions)
+    def __init__(self, model: MetabolicModel, config: dict[str, Any] | None = None, credentials: dict[str, str] | None = None):
+        super().__init__(model)
 
         if config is None:
             config = get_highs_config()
@@ -124,10 +123,8 @@ class HighsOptimizer(Optimizer):
             # Add uptake to metabolite's constraint as an increase in metabolite
             self.highs_model.changeCoeff(self._metab_constr[met_id], rxn_var.index, 1.0)
 
-        # Close all blocked reactions (per-problem deltas plus run-level,
-        # e.g. metabolic knockouts) by setting upper bound to lower bound
-        # and store previous bounds so they can be restored later
-        for rxn_id in set(delta.blocked_reactions) | self.blocked_reactions:
+        # Close per-problem blocked reactions and restore their bounds later.
+        for rxn_id in set(delta.blocked_reactions):
             var = vars_[rxn_id]
             lb, old_ub = self._get_bounds(var)
             original_ub[rxn_id] = old_ub

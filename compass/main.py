@@ -660,7 +660,7 @@ def entry():
             return
         args['block_reactions'] = read_block_reactions_file(args['block_reactions'])
         args['block_reactions'] = sorted(args['block_reactions'])  # list: JSON-serializable for batch jobs
-        logger.info("Metabolic KO: %d directed reaction(s) will be blocked in every linear program: %s",
+        logger.info("Metabolic KO: applying zero-flux bounds to %d requested direction(s): %s",
                     len(args['block_reactions']), args['block_reactions'])
 
     if args['activity_file']:
