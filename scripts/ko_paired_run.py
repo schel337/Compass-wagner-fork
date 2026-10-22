@@ -13,13 +13,13 @@ effect with two Compass runs on the same cells:
                        v_r^opt values are used as the high-activity targets.
                        Standard Compass passes them through an activity TSV.
                        Module-Compass copies each module's cache so targets
-                       remain scoped to that module. The targets are
-                       identical across the two runs.
+                       remain scoped to that module. Blocked directions in
+                       Run B receive the configured patch value.
 
 Steps:
     1. Run A:  compass --block-reactions KO --precache (isolated cache dir)
-    2. Export v_r^opt from Run A's cache -> <out>/activity_v_r_opt.tsv
-    3. Run B:  use Run A's activity TSV (standard) or per-module caches
+    2. Export KO-derived v_r^opt and prepare patched control targets.
+    3. Run B:  use the patched activity TSV (standard) or per-module caches
     4. Compare: <out>/paired_comparison.tsv (side-by-side scores + delta)
 
 Example:
@@ -115,14 +115,32 @@ def read_module_names(path):
     return names
 
 
-def seed_module_caches(source_root, destination_root, module_names, media, audit_path):
-    """Copy Run A's per-module KO maxima into Run B's module cache tree.
+def write_activity_audit(path, rows, module_scoped=False):
+    """Write raw or patched activity values as an auditable TSV."""
+    with open(path, "w") as fout:
+        if module_scoped:
+            fout.write("# module\treaction_id\tv_r_opt\n")
+            for module, reaction_id, value in rows:
+                fout.write(f"{module}\t{reaction_id}\t{value}\n")
+        else:
+            fout.write("# reaction_id\tv_r_opt\n")
+            for reaction_id, value in rows:
+                fout.write(f"{reaction_id}\t{value}\n")
 
-    Module cache keys are scoped by model name, so copying the cache tree keeps
-    targets distinct even when reaction IDs occur in multiple modules. The
-    TSV is an audit export; Module-Compass consumes the copied cache files.
+
+def seed_module_caches(source_root, destination_root, module_names, media,
+                       raw_audit_path, control_audit_path, blocked_reactions,
+                       patch_value):
+    """Copy KO caches into Run B, patching blocked targets in the copies.
+
+    Module cache keys are scoped by model name, so copying each cache keeps
+    targets distinct when reaction IDs occur in multiple modules. Missing
+    directions are ignored because a reaction may be one-way or absent from a
+    selected module; the KO file is not validated against each partition.
     """
-    audit_rows = []
+    raw_rows = []
+    control_rows = []
+    patched_count = 0
     for module in module_names:
         relative_path = os.path.join(module, media, "preprocess.json")
         source = os.path.join(source_root, relative_path)
@@ -135,17 +153,24 @@ def seed_module_caches(source_root, destination_root, module_names, media, audit
         if not values:
             raise ValueError(f"Run A's activity cache is empty for module {module!r}: {source}")
 
+        control_values = dict(values)
+        for reaction_id in blocked_reactions:
+            if reaction_id in control_values:
+                control_values[reaction_id] = patch_value
+                patched_count += 1
+
         destination = os.path.join(destination_root, relative_path)
         os.makedirs(os.path.dirname(destination), exist_ok=True)
-        shutil.copy2(source, destination)
-        audit_rows.extend((module, reaction_id, value)
-                          for reaction_id, value in sorted(values.items()))
+        with open(destination, "w") as fout:
+            json.dump(control_values, fout, indent=1, sort_keys=True)
+        raw_rows.extend((module, reaction_id, value)
+                        for reaction_id, value in sorted(values.items()))
+        control_rows.extend((module, reaction_id, value)
+                            for reaction_id, value in sorted(control_values.items()))
 
-    with open(audit_path, "w") as fout:
-        fout.write("# module\treaction_id\tv_r_opt\n")
-        for module, reaction_id, value in audit_rows:
-            fout.write(f"{module}\t{reaction_id}\t{value}\n")
-    return len(audit_rows)
+    write_activity_audit(raw_audit_path, raw_rows, module_scoped=True)
+    write_activity_audit(control_audit_path, control_rows, module_scoped=True)
+    return len(raw_rows), patched_count
 
 
 def find_module_reactions_file(out_dir, module):
@@ -214,6 +239,8 @@ def main():
                         help="Module-Compass selection file (one module definition per line)")
     parser.add_argument("--block-reactions", required=True,
                         help="KO file: one reaction ID per line; undirected IDs block both directions")
+    parser.add_argument("--patch-value", type=float, default=1.0,
+                        help="Control activity assigned to blocked directions (default: 1.0)")
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--optimizer", default="gurobi", choices=["gurobi", "highs", "cuopt"])
     parser.add_argument("--num-processes", type=int, default=4)
@@ -238,10 +265,14 @@ def main():
     _ensure_gurobi_license_for_main(args.optimizer)
 
     ko_file = os.path.abspath(args.block_reactions)
+    sys.path.insert(0, REPO_ROOT)
+    from compass.compass.activity import read_block_reactions_file
+    blocked_reactions = read_block_reactions_file(ko_file)
     module_selection = (os.path.abspath(args.select_meta_subsystems)
                         if args.select_meta_subsystems else None)
     module_names = read_module_names(module_selection) if module_selection else None
     activity_file = os.path.join(out, "activity_v_r_opt.tsv")
+    control_activity_file = os.path.join(out, "control_activity_v_r_opt.tsv")
     a_cache_dir = os.path.join(out, "runA_preprocess_cache")
     b_cache_dir = os.path.join(out, "runB_preprocess_cache")
     a_out = os.path.join(out, "with_ko")
@@ -286,29 +317,44 @@ def main():
         run_a_cmd += ["--preprocess-cache-dir", a_cache_dir]
     run_compass(run_a_cmd, timeout=args.timeout)
 
-    # ---- Step 2: export v_r^opt from Run A's cache ------------------------
-    print(f"\n[2/4] Exporting v_r^opt from Run A's cache -> {activity_file}", flush=True)
+    # ---- Step 2: export raw KO activities and prepare control targets -----
+    print("\n[2/4] Exporting KO activities and preparing control targets", flush=True)
     if module_selection:
         # Module-Compass keeps a cache per partitioned model. Preserve that
         # namespace when passing Run A's targets to Run B; a flat activity
-        # mapping cannot distinguish duplicate IDs across modules.
+        # mapping cannot distinguish duplicate IDs across modules. Keep raw
+        # KO values in the audit file and patch only the copied control cache.
         source_cache_root = os.path.join(a_out, "meta_subsystem_cache")
         destination_cache_root = os.path.join(b_out, "meta_subsystem_cache")
-        n_activities = seed_module_caches(
-            source_cache_root, destination_cache_root, module_names, args.media, activity_file)
-        print(f"  Exported {n_activities} module-scoped activities and seeded Run B's cache", flush=True)
+        n_activities, n_patched = seed_module_caches(
+            source_cache_root, destination_cache_root, module_names, args.media,
+            activity_file, control_activity_file, blocked_reactions, args.patch_value)
+        print(f"  Exported {n_activities} module-scoped activities", flush=True)
+        print(f"  Patched {n_patched} cache entries to {args.patch_value} for Run B", flush=True)
     else:
-        sys.path.insert(0, REPO_ROOT)
         from compass.compass.activity import export_activity_file
         export_activity_file(model=args.model, media=args.media, out_path=activity_file,
                              preprocess_cache_dir=a_cache_dir)
 
-        # Seed Run B's isolated cache dir with Run A's cache (auditability: the
-        # comparison run carries exactly the activity values it was given).
+        # Seed Run B's isolated cache dir from Run A, patching only the
+        # blocked directions. Keep the raw export above unchanged for audit.
         src_cache = os.path.join(a_cache_dir, args.model, args.media, "preprocess.json")
         dst_cache_dir = os.path.join(b_cache_dir, args.model, args.media)
         os.makedirs(dst_cache_dir, exist_ok=True)
-        shutil.copy(src_cache, os.path.join(dst_cache_dir, "preprocess.json"))
+        with open(src_cache) as fin:
+            raw_values = json.load(fin)
+        control_values = dict(raw_values)
+        patched_ids = []
+        for reaction_id in blocked_reactions:
+            if reaction_id in control_values:
+                control_values[reaction_id] = args.patch_value
+                patched_ids.append(reaction_id)
+        with open(os.path.join(dst_cache_dir, "preprocess.json"), "w") as fout:
+            json.dump(control_values, fout, indent=1, sort_keys=True)
+        write_activity_audit(
+            control_activity_file, sorted(control_values.items()), module_scoped=False)
+        print(f"  Patched {len(patched_ids)} cache entries to {args.patch_value} for Run B",
+              flush=True)
 
     # ---- Step 3: Run B (no KO, Run A's activities) -------------------------
     print("\n[3/4] Run B: Compass WITHOUT the KO, using Run A's v_r^opt", flush=True)
@@ -317,7 +363,7 @@ def main():
         "--temp-dir", os.path.join(b_out, "_tmp"),
     ]
     if not module_selection:
-        run_b_cmd += ["--activity-file", activity_file,
+        run_b_cmd += ["--activity-file", control_activity_file,
                       "--preprocess-cache-dir", b_cache_dir]
     run_compass(run_b_cmd, timeout=args.timeout)
 
@@ -351,22 +397,21 @@ def main():
             print(comparison.reindex(comparison["delta"].abs().sort_values(ascending=False)
                                      .index).head(20).to_string())
         # Report the KO reactions themselves
-        ko_ids = [line.strip() for line in open(ko_file)
-                  if line.strip() and not line.strip().startswith("#")]
-        print("\n  KO reactions (scores should be 0 in both runs when blocked):")
-        for rxn in ko_ids:
-            for d in (rxn, rxn + "_pos", rxn + "_neg"):
-                if d in comparison.index:
-                    print(f"    {d}: with_ko={comparison.loc[d, 'with_ko']:.6g} "
-                          f"no_ko={comparison.loc[d, 'no_ko']:.6g}")
+        print("\n  KO reactions (Run A is blocked; Run B uses patched activity targets):")
+        for reaction_id in sorted(blocked_reactions):
+            if reaction_id in comparison.index:
+                print(f"    {reaction_id}: with_ko={comparison.loc[reaction_id, 'with_ko']:.6g} "
+                      f"no_ko={comparison.loc[reaction_id, 'no_ko']:.6g}")
 
     print(f"\nDone. Outputs in {out}:")
     print("  with_ko/          Run A scores")
     print("  no_ko/            Run B scores")
     if module_selection:
-        print("  activity_v_r_opt.tsv   per-module v_r^opt audit export (copied caches feed Run B)")
+        print("  activity_v_r_opt.tsv           raw KO-derived per-module activities")
+        print("  control_activity_v_r_opt.tsv   patched control targets (per module)")
     else:
-        print("  activity_v_r_opt.tsv   v_r^opt used by Run B (from Run A's cache)")
+        print("  activity_v_r_opt.tsv           raw KO-derived v_r^opt values")
+        print("  control_activity_v_r_opt.tsv   patched values used by Run B")
     print("  paired_comparison.tsv  side-by-side scores + delta")
 
 

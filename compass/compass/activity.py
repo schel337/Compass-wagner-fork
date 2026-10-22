@@ -10,9 +10,9 @@ A paired KO experiment compares two Compass runs on the same cells:
 * **Run B (without KO):** Compass run on the unblocked model in which the
   per-reaction maximum problems are *not* solved; instead the v_r^opt
   values from Run A (exported as an "activity file") are used as the
-  high-activity targets (v_r >= BETA * v_r^opt). The activity targets are
-  therefore identical between the two runs, isolating the effect of the
-  blocked reactions themselves.
+  high-activity targets (v_r >= BETA * v_r^opt). A paired-run wrapper may
+  patch blocked directions in Run B's targets (default 1.0) while preserving
+  the raw KO-derived values in Run A's cache.
 
 This module holds the file-format helpers shared by both runs:
 
